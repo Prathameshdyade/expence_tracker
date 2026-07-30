@@ -1,0 +1,11 @@
+pandas
+numpy
+openpyxl
+streamlit
+plotly
+scipy
+matplotlib
+xlrd
+python-dateutil
+pytz
+xlsxwriter
