@@ -33,3 +33,24 @@ This repository contains a Streamlit-based finance dashboard for analyzing daily
 
 - The app expects expense data with columns such as `Date`, `Description`, `Category`, `Amount`, `Payment Mode`, `Type`, and `Notes`.
 - If you use a local Excel file, update the default path in the script or provide the path through the app.
+
+## Docker and Railway deployment
+
+### Build locally
+
+```bash
+docker build -t expense-tracker .
+docker run -p 8080:8080 -e PORT=8080 expense-tracker
+```
+
+### Deploy to Railway
+
+1. Connect this repository to Railway.
+2. Railway will use the included Dockerfile automatically.
+3. Set the following environment variable if needed:
+
+   ```text
+   DEFAULT_FILE_PATH=
+   ```
+
+4. Railway will expose the app on the assigned port.

@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -37,8 +38,9 @@ if "selected_month" not in st.session_state:
 # -----------------------------
 # LOAD DATA (flexible input: upload / path / manual entry)
 # -----------------------------
-# Default file path (kept for convenience)
-FILE_PATH = r"C:\Users\Prathamesh Dyade\OneDrive\Desktop\Personal\Finance Tracker Template (WV Email Final).xlsx"
+# Default file path (can be overridden with an environment variable)
+DEFAULT_FILE_PATH = os.getenv("DEFAULT_FILE_PATH", "")
+FILE_PATH = DEFAULT_FILE_PATH
 
 # Sidebar: choose data source
 st.sidebar.header("Data Input")
