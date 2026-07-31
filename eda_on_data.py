@@ -42,31 +42,61 @@ if "selected_month" not in st.session_state:
 DEFAULT_FILE_PATH = os.getenv("DEFAULT_FILE_PATH", "")
 FILE_PATH = DEFAULT_FILE_PATH
 
-# Sidebar: choose data source
-st.sidebar.header("Data Input")
-data_source = st.sidebar.radio(
-    "Choose data source:",
-    ("Upload File", "Provide Path", "Manual Entry", "Use Default File"),
-    index=3
+# Sidebar: choose service first
+st.sidebar.header("Choose a Service")
+selected_page = st.sidebar.radio(
+    "What would you like to do?",
+    ("Expense Dashboard", "Rent Projection", "Loan Calculator"),
+    index=0
 )
 
-uploaded_file = None
-file_path_input = ""
-
-if data_source == "Upload File":
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload Excel or CSV file",
-        type=["xlsx", "xls", "csv"],
-        help="File should contain a sheet or columns matching the daily expense tracker"
+# Data input is only required for the Expense Dashboard
+if selected_page == "Expense Dashboard":
+    st.sidebar.header("Load Your Expenses")
+    data_source = st.sidebar.radio(
+        "How would you like to provide your expenses?",
+        ("Upload expense file", "Use local file path", "Enter expenses manually", "Use saved default file"),
+        index=3
     )
-elif data_source == "Provide Path":
-    file_path_input = st.sidebar.text_input("Full file path", value=FILE_PATH)
+
+    uploaded_file = None
+    file_path_input = ""
+
+    if data_source == "Upload expense file":
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload Excel or CSV file",
+            type=["xlsx", "xls", "csv"],
+            help="Make sure the file contains Date, Description, Category, Amount, and Type columns."
+        )
+    elif data_source == "Use local file path":
+        file_path_input = st.sidebar.text_input("Full file path", value=FILE_PATH)
+else:
+    data_source = "Use saved default file"
+    uploaded_file = None
+    file_path_input = ""
 
 # Manual entry session state
 if "manual_rows" not in st.session_state:
     st.session_state.manual_rows = []
 
-if data_source == "Manual Entry":
+
+def _coerce_datetime(series):
+    if series is None:
+        return pd.Series(pd.NaT, dtype="datetime64[ns]")
+    try:
+        return pd.to_datetime(series, errors="coerce")
+    except Exception:
+        return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+
+def _format_dates(series):
+    if series is None:
+        return pd.Series([], dtype=object)
+    converted = _coerce_datetime(series)
+    return converted.dt.strftime("%Y-%m-%d").fillna("")
+
+
+if data_source == "Enter expenses manually":
     with st.sidebar.form("manual_entry_form"):
         m_date = st.date_input("Date", value=datetime.now())
         m_desc = st.text_input("Description")
@@ -129,7 +159,10 @@ def _read_input_file(uploaded_file, path):
 
 def load_data(data_source, uploaded_file=None, file_path_input=None, manual_rows=None):
     # Start with reading from file if provided
-    df = _read_input_file(uploaded_file, file_path_input if data_source == "Provide Path" else (FILE_PATH if data_source == "Use Default File" else None))
+    df = _read_input_file(
+        uploaded_file,
+        file_path_input if data_source == "Use local file path" else (FILE_PATH if data_source == "Use saved default file" else None)
+    )
 
     if df is None:
         # If no file (e.g., only manual rows), create empty df with expected columns
@@ -145,9 +178,10 @@ def load_data(data_source, uploaded_file=None, file_path_input=None, manual_rows
     df = df.dropna(subset=["Date", "Amount"], how="any") if not df.empty else df
 
     # Normalize types
+    df["Date"] = _coerce_datetime(df["Date"])
+    df = df.dropna(subset=["Date", "Amount"], how="any") if not df.empty else df
+
     if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.dropna(subset=["Date"])
         # normalize amount: remove commas and convert
         try:
             df["Amount"] = pd.to_numeric(df["Amount"].astype(str).str.replace(",", ""), errors="coerce")
@@ -167,8 +201,8 @@ def load_data(data_source, uploaded_file=None, file_path_input=None, manual_rows
     if manual_rows:
         manual_df = pd.DataFrame(manual_rows)
         if not manual_df.empty:
-            manual_df["Date"] = pd.to_datetime(manual_df["Date"], errors="coerce")
-            manual_df = manual_df.dropna(subset=["Date"])
+            manual_df["Date"] = _coerce_datetime(manual_df["Date"])
+            manual_df = manual_df.dropna(subset=["Date", "Amount"], how="any")
             try:
                 manual_df["Amount"] = pd.to_numeric(manual_df["Amount"].astype(str).str.replace(",", ""), errors="coerce")
             except Exception:
@@ -189,21 +223,31 @@ def load_data(data_source, uploaded_file=None, file_path_input=None, manual_rows
     return df
 
 
+def ensure_time_columns(df):
+    required_cols = ["Year", "Week", "Month_Num", "Month_Name", "Year_Month", "Day", "Hour"]
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df
+
+
 # Load using the selected data source
-df = load_data(
-    data_source,
-    uploaded_file=uploaded_file,
-    file_path_input=file_path_input,
-    manual_rows=st.session_state.get("manual_rows", [])
-)
+with st.status("Loading your expense data...", expanded=False) as status:
+    st.write("Reading the selected source and preparing analytics.")
+    df = load_data(
+        data_source,
+        uploaded_file=uploaded_file,
+        file_path_input=file_path_input,
+        manual_rows=st.session_state.get("manual_rows", [])
+    )
 
-selected_page = st.sidebar.radio(
-    "Choose Page",
-    ("Dashboard", "Rent Projection", "Loan Calculator"),
-    index=0
-)
+    df = ensure_time_columns(df)
+    if df.empty:
+        st.info("No expense data was found for the selected source. Upload a file, choose a local path, or add manual rows to continue.")
+    status.update(label="Data ready", state="complete")
 
 
+@st.cache_data(show_spinner=False)
 def calculate_amortization_schedule(principal, annual_rate, tenure_years, extra_payment=0, prepayment_start_month=0):
     monthly_rate = annual_rate / 12 / 100
     total_months = int(tenure_years * 12)
@@ -253,184 +297,190 @@ def calculate_amortization_schedule(principal, annual_rate, tenure_years, extra_
 
 
 def render_rent_projection():
-    st.title("🏠 Rent Projection Calculator")
-    st.markdown("*Projected rent growth and total rent paid over time.*")
+    with st.status("Updating rent projection...", expanded=False) as status:
+        st.write("Crunching the latest rent assumptions and totals.")
+        st.title("🏠 Rent Projection")
+        st.markdown("*Choose your rent assumptions and see projected monthly costs and total rent paid.*")
 
-    st.sidebar.header("Rent Projection Inputs")
-    initial_rent = st.sidebar.number_input(
-        "Initial Monthly Rent (₹)",
-        value=30000,
-        step=1000,
-        min_value=0
-    )
+        with st.container():
+            st.subheader("Rent assumptions")
+            col1, col2 = st.columns(2)
+            with col1:
+                initial_rent = st.number_input(
+                    "Initial Monthly Rent (₹)",
+                    value=30000,
+                    step=1000,
+                    min_value=0
+                )
+                years = st.slider(
+                    "Projection Years",
+                    1,
+                    40,
+                    20
+                )
+                annual_increase = st.slider(
+                    "Annual Rent Increase (%)",
+                    0.0,
+                    15.0,
+                    6.0,
+                    0.5
+                )
+            with col2:
+                move_after = st.slider(
+                    "Move to Bigger House After (Years)",
+                    0,
+                    years,
+                    10
+                )
+                jump_percent = st.slider(
+                    "Percent increase when moving",
+                    0,
+                    100,
+                    20
+                )
+                include_move = st.checkbox(
+                    "Include lifestyle upgrade",
+                    True
+                )
 
-    years = st.sidebar.slider(
-        "Projection Years",
-        1,
-        40,
-        20
-    )
+        rent = initial_rent
+        rows = []
+        cumulative = 0
 
-    annual_increase = st.sidebar.slider(
-        "Annual Rent Increase (%)",
-        0.0,
-        15.0,
-        6.0,
-        0.5
-    )
+        for year in range(1, years + 1):
+            rent *= (1 + annual_increase / 100)
 
-    move_after = st.sidebar.slider(
-        "Move to Bigger House After (Years)",
-        0,
-        years,
-        10
-    )
+            if include_move and move_after > 0 and year == move_after:
+                rent *= (1 + jump_percent / 100)
 
-    jump_percent = st.sidebar.slider(
-        "Rent Jump After Moving (%)",
-        0,
-        100,
-        20
-    )
+            yearly_cost = rent * 12
+            cumulative += yearly_cost
 
-    include_move = st.sidebar.checkbox(
-        "Include Lifestyle Upgrade",
-        True
-    )
+            rows.append({
+                "Year": year,
+                "Monthly Rent": round(rent),
+                "Annual Rent": round(yearly_cost),
+                "Cumulative Rent": round(cumulative)
+            })
 
-    rent = initial_rent
-    rows = []
-    cumulative = 0
+        projection_df = pd.DataFrame(rows)
 
-    for year in range(1, years + 1):
-        rent *= (1 + annual_increase / 100)
+        st.subheader("Projection")
+        st.dataframe(projection_df, use_container_width=True)
 
-        if include_move and move_after > 0 and year == move_after:
-            rent *= (1 + jump_percent / 100)
+        col1, col2 = st.columns(2)
+        with col1:
+            fig = px.line(
+                projection_df,
+                x="Year",
+                y="Monthly Rent",
+                markers=True,
+                title="Monthly Rent Growth"
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-        yearly_cost = rent * 12
-        cumulative += yearly_cost
+        with col2:
+            fig2 = px.line(
+                projection_df,
+                x="Year",
+                y="Cumulative Rent",
+                markers=True,
+                title="Total Rent Paid"
+            )
+            st.plotly_chart(fig2, use_container_width=True)
 
-        rows.append({
-            "Year": year,
-            "Monthly Rent": round(rent),
-            "Annual Rent": round(yearly_cost),
-            "Cumulative Rent": round(cumulative)
-        })
-
-    projection_df = pd.DataFrame(rows)
-
-    st.subheader("Projection")
-    st.dataframe(projection_df, use_container_width=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        fig = px.line(
-            projection_df,
-            x="Year",
-            y="Monthly Rent",
-            markers=True,
-            title="Monthly Rent Growth"
+        st.metric(
+            f"Monthly Rent After {years} Years",
+            f"₹{projection_df.iloc[-1]['Monthly Rent']:,}"
         )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig2 = px.line(
-            projection_df,
-            x="Year",
-            y="Cumulative Rent",
-            markers=True,
-            title="Total Rent Paid"
+        st.metric(
+            "Total Rent Paid",
+            f"₹{projection_df.iloc[-1]['Cumulative Rent']:,}"
         )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.metric(
-        f"Monthly Rent After {years} Years",
-        f"₹{projection_df.iloc[-1]['Monthly Rent']:,}"
-    )
-    st.metric(
-        "Total Rent Paid",
-        f"₹{projection_df.iloc[-1]['Cumulative Rent']:,}"
-    )
+        status.update(label="Rent projection ready", state="complete")
 
 
 def render_loan_calculator():
-    st.title("🏦 Loan Amortization Calculator")
-    st.markdown("*Calculate loan EMI, interest, principal repayment, and outstanding balance month by month.*")
+    with st.status("Updating loan calculator...", expanded=False) as status:
+        st.write("Calculating EMI schedules and repayment details.")
+        st.title("🏦 Loan Calculator")
+        st.markdown("*Set your loan amount, interest rate, tenure, and prepayment options to see monthly EMI and balance evolution.*")
 
-    st.sidebar.header("Loan Inputs")
-    loan_amount = st.sidebar.number_input(
-        "Loan Amount (₹)",
-        min_value=0,
-        value=5000000,
-        step=10000,
-        format="%d"
-    )
+        with st.container():
+            st.subheader("Loan details")
+            col1, col2 = st.columns(2)
+            with col1:
+                loan_amount = st.number_input(
+                    "Loan Amount (₹)",
+                    min_value=0,
+                    value=5000000,
+                    step=10000,
+                    format="%d"
+                )
+                annual_rate = st.number_input(
+                    "Annual Interest Rate (%)",
+                    min_value=0.0,
+                    value=8.0,
+                    step=0.1,
+                    format="%.2f"
+                )
+                tenure_years = st.slider(
+                    "Loan Tenure (Years)",
+                    1,
+                    40,
+                    25
+                )
+            with col2:
+                include_prepayment = st.checkbox("Include monthly prepayment", False)
+                prepayment_start_month = 0
+                monthly_prepayment = 0
+                if include_prepayment:
+                    prepayment_start_month = st.number_input(
+                        "Prepayment starts after month",
+                        min_value=1,
+                        max_value=tenure_years * 12,
+                        value=1,
+                        step=1
+                    )
+                    monthly_prepayment = st.number_input(
+                        "Monthly Prepayment Amount (₹)",
+                        min_value=0,
+                        value=0,
+                        step=1000,
+                        format="%d"
+                    )
 
-    annual_rate = st.sidebar.number_input(
-        "Annual Interest Rate (%)",
-        min_value=0.0,
-        value=8.0,
-        step=0.1,
-        format="%.2f"
-    )
-
-    tenure_years = st.sidebar.slider(
-        "Loan Tenure (Years)",
-        1,
-        40,
-        25
-    )
-
-    include_prepayment = st.sidebar.checkbox("Include Monthly Prepayment", False)
-    prepayment_start_month = 0
-    monthly_prepayment = 0
-
-    if include_prepayment:
-        prepayment_start_month = st.sidebar.number_input(
-            "Prepayment starts after month",
-            min_value=1,
-            max_value=tenure_years * 12,
-            value=1,
-            step=1
+        schedule_df, emi, total_principal, total_interest, total_paid = calculate_amortization_schedule(
+            loan_amount,
+            annual_rate,
+            tenure_years,
+            extra_payment=monthly_prepayment,
+            prepayment_start_month=prepayment_start_month
         )
-        monthly_prepayment = st.sidebar.number_input(
-            "Monthly Prepayment Amount (₹)",
-            min_value=0,
-            value=0,
-            step=1000,
-            format="%d"
-        )
 
-    schedule_df, emi, total_principal, total_interest, total_paid = calculate_amortization_schedule(
-        loan_amount,
-        annual_rate,
-        tenure_years,
-        extra_payment=monthly_prepayment,
-        prepayment_start_month=prepayment_start_month
-    )
+        st.subheader("Loan Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Monthly EMI", f"₹{emi:,}")
+        col2.metric("Total Principal Paid", f"₹{total_principal:,}")
+        col3.metric("Total Interest Paid", f"₹{total_interest:,}")
+        col4.metric("Total Amount Paid", f"₹{total_paid:,}")
 
-    st.subheader("Loan Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Monthly EMI", f"₹{emi:,}")
-    col2.metric("Total Principal Paid", f"₹{total_principal:,}")
-    col3.metric("Total Interest Paid", f"₹{total_interest:,}")
-    col4.metric("Total Amount Paid", f"₹{total_paid:,}")
-
-    st.subheader("Amortization Schedule")
-    st.dataframe(
-        schedule_df,
-        use_container_width=True
-    )
-
-    with st.expander("Show charts"):
-        fig = px.line(
+        st.subheader("Amortization Schedule")
+        st.dataframe(
             schedule_df,
-            x="Month",
-            y=["Outstanding Loan", "Interest Paid", "Principal Paid"],
-            title="Loan Balance and Repayments Over Time"
+            use_container_width=True
         )
-        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Show charts"):
+            fig = px.line(
+                schedule_df,
+                x="Month",
+                y=["Outstanding Loan", "Interest Paid", "Principal Paid"],
+                title="Loan Balance and Repayments Over Time"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        status.update(label="Loan calculator ready", state="complete")
 
 
 if selected_page == "Rent Projection":
@@ -440,54 +490,65 @@ elif selected_page == "Loan Calculator":
     render_loan_calculator()
     st.stop()
 
-st.title("💰 Personal Finance Intelligence Dashboard")
-st.markdown("*Professional expense tracking & financial analysis*")
+with st.status("Refreshing dashboard insights...", expanded=False) as status:
+    st.write("Preparing the latest metrics, trends, and transaction drill-downs.")
+    st.title("💰 Personal Finance Intelligence Dashboard")
+    st.markdown("*Professional expense tracking & financial analysis*")
 
-# Calculate metrics (robust to empty/malformed data)
-def _safe_sum(series):
-    try:
-        return float(series.sum())
-    except Exception:
-        return 0.0
+    # Calculate metrics (robust to empty/malformed data)
+    def _safe_sum(series):
+        try:
+            return float(series.sum())
+        except Exception:
+            return 0.0
 
-total_spend = _safe_sum(df["Amount"]) if "Amount" in df.columns else 0.0
-need_spend = _safe_sum(df[df.get("Type") == "Need"]["Amount"]) if "Type" in df.columns else 0.0
-want_spend = _safe_sum(df[df.get("Type") == "Want"]["Amount"]) if "Type" in df.columns else 0.0
-investment = _safe_sum(df[df.get("Category") == "Performance & Growth"]["Amount"]) if "Category" in df.columns else 0.0
+    def _safe_ratio(numerator, denominator):
+        try:
+            return float(numerator) / float(denominator) if denominator else 0.0
+        except Exception:
+            return 0.0
 
-# KPI Section
-st.markdown("<div class='header-section'>", unsafe_allow_html=True)
-col1, col2, col3, col4 = st.columns(4)
+    def _safe_percentage(numerator, denominator):
+        return _safe_ratio(numerator, denominator) * 100
 
-with col1:
-    st.metric("💰 Total Spend", f"₹{total_spend:,.0f}", delta=None)
-with col2:
-    need_pct = f"{(need_spend/total_spend*100):.1f}%" if total_spend else "0.0%"
-    st.metric("📌 Need Spend", f"₹{need_spend:,.0f}", need_pct)
-with col3:
-    want_pct = f"{(want_spend/total_spend*100):.1f}%" if total_spend else "0.0%"
-    st.metric("🎯 Want Spend", f"₹{want_spend:,.0f}", want_pct)
-with col4:
-    invest_pct = f"{(investment/total_spend*100):.1f}%" if total_spend else "0.0%"
-    st.metric("📈 Investments", f"₹{investment:,.0f}", invest_pct)
+    total_spend = _safe_sum(df["Amount"]) if "Amount" in df.columns else 0.0
+    need_spend = _safe_sum(df[df.get("Type") == "Need"]["Amount"]) if "Type" in df.columns else 0.0
+    want_spend = _safe_sum(df[df.get("Type") == "Want"]["Amount"]) if "Type" in df.columns else 0.0
+    investment = _safe_sum(df[df.get("Category") == "Performance & Growth"]["Amount"]) if "Category" in df.columns else 0.0
 
-st.markdown("</div>", unsafe_allow_html=True)
+    # KPI Section
+    st.markdown("<div class='header-section'>", unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
 
-# Helper functions for drilling down
-def get_week_month_name(week_num, month_num):
-    """Get month name for a given week"""
-    try:
-        if "Week" in df.columns and week_num in df["Week"].values:
-            year_vals = df[df["Week"] == week_num]["Year"]
-            if not year_vals.empty:
-                year = int(year_vals.iloc[0])
+    with col1:
+        st.metric("💰 Total Spend", f"₹{total_spend:,.0f}", delta=None)
+    with col2:
+        need_pct = f"{_safe_percentage(need_spend, total_spend):.1f}%"
+        st.metric("📌 Need Spend", f"₹{need_spend:,.0f}", need_pct)
+    with col3:
+        want_pct = f"{_safe_percentage(want_spend, total_spend):.1f}%"
+        st.metric("🎯 Want Spend", f"₹{want_spend:,.0f}", want_pct)
+    with col4:
+        invest_pct = f"{_safe_percentage(investment, total_spend):.1f}%"
+        st.metric("📈 Investments", f"₹{investment:,.0f}", invest_pct)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Helper functions for drilling down
+    def get_week_month_name(week_num, month_num):
+        """Get month name for a given week"""
+        try:
+            if "Week" in df.columns and week_num in df["Week"].values:
+                year_vals = df[df["Week"] == week_num]["Year"]
+                if not year_vals.empty:
+                    year = int(year_vals.iloc[0])
+                else:
+                    year = datetime.now().year
             else:
                 year = datetime.now().year
-        else:
+        except Exception:
             year = datetime.now().year
-    except Exception:
-        year = datetime.now().year
-    return f"Week {week_num}"
+        return f"Week {week_num}"
 
 def get_top_transactions_by_week(week_num):
     """Get top transactions for a specific week"""
@@ -513,12 +574,15 @@ if st.session_state.view == "overview":
     st.header("📅 Weekly Spending Analysis")
     st.markdown("</div>", unsafe_allow_html=True)
     
-    weekly = (
-        df.groupby("Week")["Amount"]
-        .agg(["sum", "count"])
-        .reset_index()
-        .rename(columns={"sum": "Amount", "count": "Transactions"})
-    )
+    if "Week" not in df.columns or df["Week"].dropna().empty:
+        weekly = pd.DataFrame(columns=["Week", "Amount", "Transactions"])
+    else:
+        weekly = (
+            df.groupby("Week")["Amount"]
+            .agg(["sum", "count"])
+            .reset_index()
+            .rename(columns={"sum": "Amount", "count": "Transactions"})
+        )
     if weekly.empty:
         st.info("No weekly data available to display.")
     else:
@@ -592,12 +656,15 @@ if st.session_state.view == "overview":
     st.header("📈 Monthly Spending Analysis")
     st.markdown("</div>", unsafe_allow_html=True)
     
-    monthly = (
-        df.groupby("Year_Month")["Amount"]
-        .agg(["sum", "count"])
-        .reset_index()
-        .rename(columns={"sum": "Amount", "count": "Transactions"})
-    )
+    if "Year_Month" not in df.columns or df["Year_Month"].dropna().empty:
+        monthly = pd.DataFrame(columns=["Year_Month", "Amount", "Transactions"])
+    else:
+        monthly = (
+            df.groupby("Year_Month")["Amount"]
+            .agg(["sum", "count"])
+            .reset_index()
+            .rename(columns={"sum": "Amount", "count": "Transactions"})
+        )
     if monthly.empty:
         st.info("No monthly data available to display.")
     else:
@@ -822,12 +889,16 @@ if st.session_state.view == "overview":
         .sort_values(ascending=False)
     )
     
+    # Convert series to DataFrame for plotly express
+    payment_df = payment.reset_index(name="Amount")
+
     fig = px.bar(
-        x=payment.index,
-        y=payment.values,
-        color=payment.values,
+        payment_df,
+        x="Payment Mode",
+        y="Amount",
+        color="Amount",
         color_continuous_scale="Viridis",
-        labels={"x": "Payment Mode", "y": "Amount (₹)"},
+        labels={"Payment Mode": "Payment Mode", "Amount": "Amount (₹)"},
         title="Spending by Payment Mode"
     )
     fig.update_layout(height=400, template="plotly_white")
@@ -892,13 +963,16 @@ if st.session_state.view == "overview":
     
     # Investment breakdown visualization
     st.subheader("Spending vs Investment Balance")
-    
+
+    period_days = len(df["Date"].dropna().unique()) if "Date" in df.columns else 0
+    annualization_factor = 365 / period_days if period_days > 0 else 0.0
+
     balance_data = pd.DataFrame({
         "Category": ["Annual Need", "Annual Want", "Annual Investment"],
         "Amount": [
-            need_spend * (365 / len(df["Date"].unique())),
-            want_spend * (365 / len(df["Date"].unique())),
-            investment * (365 / len(df["Date"].unique()))
+            need_spend * annualization_factor,
+            want_spend * annualization_factor,
+            investment * annualization_factor
         ]
     })
     
@@ -924,12 +998,12 @@ if st.session_state.view == "overview":
     insight_col1, insight_col2 = st.columns(2)
     
     with insight_col1:
-        investment_ratio = (investment / total_spend) * 100
-        st.metric("Investment Ratio", f"{investment_ratio:.1f}%", 
+        investment_ratio = _safe_percentage(investment, total_spend)
+        st.metric("Investment Ratio", f"{investment_ratio:.1f}%",
                  "Target: 10-20%" if investment_ratio < 10 else "On Track" if investment_ratio <= 20 else "Exceeds Target")
-    
+
     with insight_col2:
-        want_ratio = (want_spend / total_spend) * 100
+        want_ratio = _safe_percentage(want_spend, total_spend)
         st.metric("Discretionary Spending", f"{want_ratio:.1f}%",
                  "High" if want_ratio > 40 else "Moderate" if want_ratio > 20 else "Low")
     
@@ -947,7 +1021,7 @@ if st.session_state.view == "overview":
     )
     
     display_top = top[["Date", "Description", "Category", "Type", "Amount"]].copy()
-    display_top["Date"] = display_top["Date"].dt.strftime("%Y-%m-%d")
+    display_top["Date"] = _format_dates(display_top["Date"])
     
     st.dataframe(display_top, use_container_width=True, hide_index=True)
     
@@ -1032,25 +1106,31 @@ if st.session_state.view == "overview":
         insights.append("⚠️ High discretionary spending detected - exceeds 50% of needs.")
         recommendations.append("Consider reviewing discretionary purchases to optimize budget allocation.")
     
-    if investment < total_spend * 0.1:
+    if total_spend and investment < total_spend * 0.1:
         insights.append("📊 Investment allocation is below recommended 10-20% threshold.")
         recommendations.append("Increase investment contributions to build long-term wealth.")
     else:
         insights.append("✅ Investment allocation is within recommended range!")
-    
-    top_category = cat.idxmax()
-    top_category_amount = cat.max()
-    top_category_pct = (top_category_amount / total_spend) * 100
-    insights.append(f"🏷️ Highest spending category: **{top_category}** (₹{top_category_amount:,.0f}, {top_category_pct:.1f}%)")
-    
+
+    if not cat.empty:
+        top_category = cat.idxmax()
+        top_category_amount = cat.max()
+        top_category_pct = _safe_percentage(top_category_amount, total_spend)
+        insights.append(f"🏷️ Highest spending category: **{top_category}** (₹{top_category_amount:,.0f}, {top_category_pct:.1f}%)")
+    else:
+        insights.append("🏷️ No category spending data available to determine the highest spending category.")
+
     avg_daily = (df.groupby("Date")["Amount"].sum().mean())
     insights.append(f"📅 Average daily spend: **₹{avg_daily:,.0f}**")
-    
+
     # Day-based insight
-    busiest_day = daily_spend.loc[daily_spend["sum"].idxmax()]
-    insights.append(f"📍 Highest spending day: **{busiest_day['Day']}** (₹{busiest_day['sum']:,.0f})")
-    
-    if want_spend / total_spend > 0.6:
+    if not daily_spend.empty:
+        busiest_day = daily_spend.loc[daily_spend["sum"].idxmax()]
+        insights.append(f"📍 Highest spending day: **{busiest_day['Day']}** (₹{busiest_day['sum']:,.0f})")
+    else:
+        insights.append("📍 No spending day data available to determine the busiest spending day.")
+
+    if _safe_ratio(want_spend, total_spend) > 0.6:
         recommendations.append("Prioritize needs over wants. Current split favors discretionary spending.")
     
     # Display insights
